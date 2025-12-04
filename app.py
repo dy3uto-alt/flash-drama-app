@@ -21,7 +21,8 @@ except:
 # --- 3. 初始化连接 ---
 api = Api(AIRTABLE_TOKEN)
 table = api.table(BASE_ID, TABLE_ID)
-client = OpenAI(api_key=OPENAI_API_KEY)
+# 增加 base_url 参数，指向 DeepSeek
+client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://api.deepseek.com")
 
 # --- 4. 侧边栏：控制台 ---
 with st.sidebar:
@@ -95,7 +96,7 @@ def remix_script(row, user_topic):
     """
     
     response = client.chat.completions.create(
-        model="gpt-4o-min", 
+        model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.8
     )
