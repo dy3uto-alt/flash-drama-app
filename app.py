@@ -95,7 +95,7 @@ def remix_script(row, user_topic):
     """
     
     response = client.chat.completions.create(
-        model="gpt-4o", # 或者 gpt-4o-mini
+        model="gpt-4o-min", 
         messages=[{"role": "user", "content": prompt}],
         temperature=0.8
     )
