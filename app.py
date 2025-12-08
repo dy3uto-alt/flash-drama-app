@@ -5,141 +5,155 @@ from openai import OpenAI
 import random
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="⚡️闪剧生成器", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="⚡️闪剧生成器 (Pro)", page_icon="🎬", layout="wide")
 
-# --- 2. 获取 API Keys (从 Secrets 获取) ---
-# 我们稍后会在 Streamlit 后台配置这些钥匙，不要直接写在这里
+# --- 2. 获取 API Keys ---
 try:
+    # 优先尝试从 Secrets 获取
     AIRTABLE_TOKEN = st.secrets["AIRTABLE_TOKEN"]
     BASE_ID = st.secrets["AIRTABLE_BASE_ID"]
     TABLE_ID = st.secrets["AIRTABLE_TABLE_ID"]
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 except:
-    st.error("请先在 Streamlit Cloud 设置 Secrets！")
+    st.error("请在 Streamlit Cloud 设置 Secrets！")
     st.stop()
 
 # --- 3. 初始化连接 ---
 api = Api(AIRTABLE_TOKEN)
 table = api.table(BASE_ID, TABLE_ID)
-# 增加 base_url 参数，指向 DeepSeek
-client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://api.deepseek.com")
 
-# --- 4. 侧边栏：控制台 ---
+# 自动判断是 DeepSeek 还是 OpenAI (根据你 secrets 填的 key 决定，这里代码通用)
+# 如果你用的是 DeepSeek/硅基流动，记得在 Secrets 里改 Key，这里代码不用动
+# 为了兼容性，如果你用 DeepSeek，建议显式指定 base_url
+BASE_URL = "https://api.deepseek.com" # 如果是用 OpenAI，请把这行删掉或改为 None
+# BASE_URL = "https://api.siliconflow.cn/v1" # 如果是硅基流动
+
+if "sk-" in OPENAI_API_KEY: 
+    # 简单的判断，实际部署时请确保 base_url 和 key 匹配
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url=BASE_URL)
+else:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# --- 4. 侧边栏：导演控制台 ---
 with st.sidebar:
-    st.title("🎛️ 导演控制台")
-    st.markdown("---")
+    st.header("🎛️ 导演控制台")
     
     # 输入话题
-    topic = st.text_input("1. 输入热点话题/情绪", "不想上班，想发疯")
+    topic = st.text_area("1. 输入热点话题/情绪", "过年回家被催婚，想发疯", height=100)
     
-    # 难度筛选 (从 Airtable 数据筛选)
-    difficulty_filter = st.selectbox(
-        "2. 拍摄难度限制",
-        ["All (所有难度)", "Low (低成本穷鬼模式)", "Medium (进阶模式)"]
-    )
-    
-    # 风格倾向
+    # 风格滤镜
     style_mood = st.selectbox(
-        "3. 风格倾向",
-        ["随机 (Surprise Me)", "荒诞/搞笑", "压抑/冷酷", "暴力美学", "浪漫/唯美"]
+        "2. 风格倾向",
+        ["随机 (Surprise Me)", "荒诞/黑色幽默", "压抑/冷酷", "暴力美学", "浪漫/唯美"]
     )
+    
+    # 生成按钮
+    generate_btn = st.button("🚀 开始重混 (Remix)", type="primary")
     
     st.markdown("---")
-    st.caption("⚡️ Flash Drama Generator v1.0")
+    st.caption("Flash Drama Generator v1.5")
 
 # --- 5. 主界面 ---
 st.title("⚡️ 闪剧脚本生成器")
-st.markdown(f"当前任务：为 **“{topic}”** 生成碎片化影像脚本")
 
-# 核心逻辑函数：从 Airtable 拿数据
-@st.cache_data(ttl=600) # 缓存10分钟，避免频繁消耗 API
+# 核心函数：获取数据
+@st.cache_data(ttl=600)
 def fetch_data():
-    # 获取所有数据
     records = table.all()
-    # 转换为 DataFrame 方便处理
     data = []
     for r in records:
         fields = r['fields']
+        # 做了容错处理，防止字段不存在报错
         data.append({
-            "Action Name": fields.get("Action Name"),
-            "Visual Description": fields.get("Visual Description"),
-            "Emotion": fields.get("Emotion", []),
-            "Difficulty": fields.get("Difficulty"),
-            "Props": fields.get("Props"),
-            "MJ Prompt": fields.get("MJ Prompt"),
-            "Origin URL": fields.get("Original Trope URL")
+            "Action Name": fields.get("Action Name", "未知动作"),
+            "Visual Description": fields.get("Visual Description", "无描述"),
+            "Props": fields.get("Props", "无道具"),
+            "Difficulty": fields.get("Difficulty", "Low"),
+            "Origin URL": fields.get("Original Trope URL", "#")
         })
     return pd.DataFrame(data)
 
-# 核心逻辑函数：调用 AI 重混
-def remix_script(row, user_topic):
+# 核心函数：AI 重混 (加入符号提取逻辑)
+def remix_script(row, user_topic, style):
     prompt = f"""
     Role: 你是一位先锋短视频导演。
-    Task: 基于用户话题和指定的动作符号，生成一个“闪剧”拍摄方案。
     
-    Input:
-    - 话题: {user_topic}
-    - 动作符号: {row['Action Name']} ({row['Visual Description']})
-    - 原始道具: {row['Props']}
+    Task: 将用户给定的【话题】强行植入到指定的【动作符号】中，生成一个“闪剧”拍摄方案。
     
-    Constraints (必须遵守):
-    1. 单镜头 (One Take)。
-    2. 穷鬼美学：严禁后期特效，必须用“生活廉价道具”物理模拟所有视觉奇观。
-    3. 风格：荒诞、错位。
-    4. 字数：控制在 150 字以内。
+    Input Data:
+    - 话题/情绪: "{user_topic}"
+    - 风格倾向: "{style}"
+    - 基础动作符号: "{row['Action Name']}"
+    - 动作视觉描述: "{row['Visual Description']}"
+    - 原始道具建议: "{row['Props']}"
     
-    Output Format:
-    请直接输出一段通过 Markdown 格式渲染的文本，包含：
-    **🎥 画面与调度：** ...
-    **🛠️ 穷鬼特效：** ...
-    **🎭 演员状态：** ...
+    Step-by-Step Thinking:
+    1. **符号解码：** 先分析这个“基础动作”的经典之处（Iconic Element）在哪里？（比如：如果是泰坦尼克号，经典在于双臂张开；如果是无间道，经典在于指头）。
+    2. **错位重组：** 保持这个“经典动作”不变，但把里面的道具和人物动机，替换成"{user_topic}"相关的元素。
+    3. **穷鬼化：** 所有特效必须用廉价生活用品模拟。
+
+    Output Format (Markdown):
+    请直接输出脚本卡片内容：
+    
+    ### 🎬 剧名：[结合话题起个怪名字]
+    
+    **👁️ 视觉符号 (The Hook):**
+    [一句话描述这是什么动作的变体，例如：致敬《无间道》天台，但拿的是辣条]
+    
+    **🎥 单镜头调度:**
+    [详细描述画面。谁？在哪里？做了什么？必须保留原动作的经典特征！]
+    
+    **🛠️ 穷鬼特效/道具:**
+    *   **核心道具:** [...替换为生活用品]
+    *   **操作:** [...如何使用]
+    
+    **🎭 演员状态:**
+    [面瘫/极度夸张/抽搐]
     """
     
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.8
-    )
-    return response.choices[0].message.content
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat", # 如果用 OpenAI 改为 gpt-4o-mini
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9 # 高一点，让创意更疯一点
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"AI 生成出错: {e}"
 
-# --- 6. 生成按钮逻辑 ---
-if st.button("🚀 开始重混 (Remix)", type="primary"):
-    with st.spinner("正在检索动作库并重混..."):
-        # 1. 拿数据
+# --- 6. 业务逻辑 ---
+if generate_btn:
+    if not topic:
+        st.warning("请输入话题！")
+        st.stop()
+        
+    with st.spinner("正在从资产库提取符号..."):
         df = fetch_data()
         
-        # 2. 筛选数据
-        if difficulty_filter != "All (所有难度)":
-            # 简单的关键词匹配筛选，比如只留 Low
-            keyword = difficulty_filter.split(" ")[0] # 拿到 "Low"
-            df = df[df['Difficulty'] == keyword]
-        
         if df.empty:
-            st.error("没有找到符合难度的动作，请尝试选择 All。")
+            st.error("Airtable 里没有数据！请先去 Make 跑一点数据出来。")
             st.stop()
             
-        # 3. 随机抽取 1 个动作 (未来可以做生成多个)
-        # 这里加入风格筛选逻辑会更复杂，暂时先做随机，保证跑通
+        # 随机抽取 1 个动作 (模拟“洗牌”)
         selected_row = df.sample(1).iloc[0]
         
-        # 4. AI 生成
-        script_content = remix_script(selected_row, topic)
+    # 显示抽中的卡
+    st.success(f"匹配到动作符号：**{selected_row['Action Name']}**")
+    
+    with st.spinner("AI 导演正在重混脚本..."):
+        script = remix_script(selected_row, topic, style_mood)
         
-        # 5. 显示结果
-        st.success("生成完毕！")
-        
-        # 显示大卡片
+        # 展示结果
         with st.container(border=True):
             col1, col2 = st.columns([1, 2])
             
             with col1:
-                st.subheader(f"🎬 {selected_row['Action Name']}")
-                st.info(f"难度: {selected_row['Difficulty']}")
-                st.markdown(f"**致敬出处:** [点击查看原始梗]({selected_row['Origin URL']})")
-                st.markdown("---")
-                st.caption("分镜参考 Prompt (可复制到 Midjourney):")
-                st.code(selected_row['MJ Prompt'], language="text")
-
+                st.subheader("📦 原始素材")
+                st.markdown(f"**动作:** {selected_row['Action Name']}")
+                st.caption(selected_row['Visual Description'])
+                st.markdown(f"**难度:** {selected_row['Difficulty']}")
+                st.markdown(f"[查看原始出处]({selected_row['Origin URL']})")
+                
             with col2:
-                st.markdown("### 📝 拍摄脚本")
-                st.markdown(script_content)
+                st.markdown(script)
